@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+    "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+    "https://checkstyle.org/dtds/configuration_1_3.dtd">
+<module name="Checker">
+    <property name="charset" value="UTF-8"/>
+
+    <module name="TreeWalker">
+        <!-- Star imports hide where a class came from and silently break
+             when two packages gain a same-named class. -->
+        <module name="AvoidStarImport"/>
+
+        <!-- Parameters must be final so they cannot be quietly reassigned
+             halfway through a method. -->
+        <module name="FinalParameters"/>
+
+        <!-- Past ~12 independent paths nobody can hold the method in their
+             head, including you in a month. -->
+        <module name="CyclomaticComplexity">
+            <property name="max" value="12"/>
+        </module>
+
+        <!-- Deliberately NO Javadoc rules: forced comments on every method
+             produce boilerplate nobody reads. -->
+    </module>
+</module>
