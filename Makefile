@@ -46,7 +46,7 @@ test: ## run the Java tests
 	@echo "placeholder: real once the first Maven module lands (Phase 0)"
 
 fmt: ## format the code
-	@echo "placeholder: real in Task 0.3 - quality gates that fail the build"
+	mvn spotless:apply
 
 smoke: ## end-to-end smoke test against the running stack
 	@echo "placeholder: real in Task 1.11 - the Testcontainers harness"
