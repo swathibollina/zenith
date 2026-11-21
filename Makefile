@@ -22,6 +22,9 @@ down: ## stop and remove containers; data survives in the volumes
 reset: ## DESTRUCTIVE factory reset: containers AND volumes gone
 	$(COMPOSE) down -v --remove-orphans
 
+secrets: ## used to check if any secrets are in code which can be mistakenly committed to git
+	gitleaks dir . -v --no-banner
+
 logs: ## follow logs (make logs s=kafka for one service)
 	$(COMPOSE) logs -f $(s)
 
