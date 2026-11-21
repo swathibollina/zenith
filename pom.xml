@@ -103,6 +103,60 @@
                 </execution>
             </executions>
         </plugin>
+        <plugin>
+            <groupId>org.jacoco</groupId>
+            <artifactId>jacoco-maven-plugin</artifactId>
+            <version>0.8.16</version>
+            <configuration>
+                <excludes>
+                    <!-- Bootstrap class is framework ceremony with zero logic;
+                        covering main() would be theatre. Nothing else goes here. -->
+                    <exclude>**/*Application.class</exclude>
+                </excludes>
+            </configuration>
+            <executions>
+                <execution>
+                    <id>jacoco-prepare-agent</id>
+                    <goals>
+                        <goal>prepare-agent</goal>
+                    </goals>
+                </execution>
+                <execution>
+                    <id>jacoco-check</id>
+                    <phase>verify</phase>
+                    <goals>
+                        <goal>check</goal>
+                    </goals>
+                    <configuration>
+                        <rules>
+                            <rule>
+                                <element>BUNDLE</element>
+                                <!--
+                                RATCHET, not target: a fixed "must be 80%" on day one
+                                forces meaningless tests written only to hit a number.
+                                These floors start where coverage honestly is today and
+                                only forbid going backwards, so decay fails the build
+                                without inviting test theatre.
+                                Raise these numbers as real coverage grows; NEVER lower them.
+                                -->
+                                <limits>
+                                    <limit>
+                                        <counter>LINE</counter>
+                                        <value>COVEREDRATIO</value>
+                                        <minimum>0.60</minimum>
+                                    </limit>
+                                    <limit>
+                                        <counter>BRANCH</counter>
+                                        <value>COVEREDRATIO</value>
+                                        <minimum>0.50</minimum>
+                                    </limit>
+                                </limits>
+                            </rule>
+                        </rules>
+                    </configuration>
+                </execution>
+            </executions>
+        </plugin>
         </plugins>
     </build>
 
