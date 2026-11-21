@@ -1,0 +1,160 @@
+name: infra
+
+# Profiles: core (postgres+redis), events (kafka+schema-registry), media (minio+init),
+# full (everything). observe and edge are planned but empty - a profile only exists once a
+# service references it; Prometheus/Grafana will create observe, the nginx gateway creates
+# edge, in later phases. Default comes from COMPOSE_PROFILES=full in .env; an explicit
+# --profile flag overrides it.
+
+services:
+  postgres:
+    profiles: ["core", "full"] # start with: --profile core (or full)
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD} # value lives in .env beside this file
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    profiles: ["core", "full"]
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  kafka:
+    profiles: ["events", "full"]
+    image: apache/kafka:4.4.0
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+    healthcheck:
+      # a JVM tool, so give it room: generous timeout, and a grace window at startup
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 15s
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+      KAFKA_LISTENERS: PLAINTEXT://:29092,PLAINTEXT_HOST://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_HEAP_OPTS: -Xmx512m -Xms512m
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+
+  # no volume on purpose: stateless - its whole truth lives in Kafka's _schemas topic
+  schema-registry:
+    profiles: ["events", "full"]
+    image: confluentinc/cp-schema-registry:8.4.1
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    healthcheck:
+      # image has no curl/wget; bash's /dev/tcp proves the API port accepts connections
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8081'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+    depends_on:
+      kafka:
+        condition: service_healthy # do not even start me until Kafka's healthcheck passes
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092 # the container-world door
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_HEAP_OPTS: -Xmx256m -Xms256m
+
+  # MinIO pulled its public images in 2025 (Docker Hub deleted, quay.io private,
+  # dl.min.io returns 410). Chainguard rebuilds current MinIO from source; its free
+  # tier offers :latest only, so this one image cannot be version-pinned.
+  minio:
+    profiles: ["media", "full"]
+    image: cgr.dev/chainguard/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD} # value lives in .env beside this file
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      # image has no curl/wget, but bundles mc: alias is idempotent, ready asks the health API
+      test: ["CMD-SHELL", "mc alias set health http://localhost:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} >/dev/null 2>&1 && mc ready health >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio-init: # runs once, creates the first bucket, exits. Exit 0 = success.
+    # own profile, outside media/full: compose 5.8's `up --wait` counts an exited job -
+    # even exit 0 - as a wait failure. So `make up` runs this explicitly after the wait:
+    #   docker compose run --rm minio-init
+    profiles: ["init"]
+    restart: "no" # quoted! bare no is YAML for false. A job must NOT be resurrected (Step 4's one exception)
+    # mc from the frozen-but-public Bitnami archive; a 2025 mc speaks S3 fine forever.
+    image: bitnamilegacy/minio-client:2025.7.21
+    depends_on:
+      minio:
+        condition: service_healthy # start the job only against a ready MinIO (loop stays as defense in depth)
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}; do
+          echo "waiting for minio..."; sleep 1
+        done
+        mc mb --ignore-existing local/media
+        echo "bucket 'media' ready"
+
+  mailpit: # healthcheck comes baked into the image - visible as (healthy) since Lesson 8
+    profiles: ["full"] # in no small group; part of the full stack (or start by name: up -d mailpit)
+    image: axllent/mailpit:v1.34.0
+    restart: unless-stopped
+    ports:
+      - "1025:1025" # SMTP - where the app hands over email
+      - "8025:8025" # web UI + API - where you read it
+    environment:
+      MP_DATABASE: /data/mailpit.db # default is in-memory; a file makes caught mail survive
+    volumes:
+      - mailpit-data:/data
+
+networks:
+  default: # keep every service on the one default network, but give it a fixed name:
+    name: infra-net # stable regardless of folder/project naming; other tools can join it by name
+
+volumes: # named volumes: Docker-managed folders that outlive the containers
+  pg-data:
+  redis-data:
+  kafka-data:
+  minio-data:
+  mailpit-data:
