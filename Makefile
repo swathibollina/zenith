@@ -58,7 +58,8 @@ seed: ## load demo data (will take scale=small|full from Task 3.1 on)
 	@echo "placeholder: real in Task 3.1 - realistic data volume and a measured baseline"
 
 ci: ## run the whole CI pipeline locally
-	@echo "placeholder: real in Task 0.4 - git workflow, the remote, and a local CI pipeline"
+	gitleaks dir . -v --no-banner
+	mvn -B clean verify
 
 cd: ## deploy pipeline
 	@echo "placeholder: real in Task 13.4 - CI/CD pipeline"

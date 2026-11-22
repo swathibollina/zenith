@@ -7,7 +7,6 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 public class CatalogServiceApplication {
 
   public static void main(final String[] args) {
-    // removing this
     SpringApplication.run(CatalogServiceApplication.class, args);
   }
 }
