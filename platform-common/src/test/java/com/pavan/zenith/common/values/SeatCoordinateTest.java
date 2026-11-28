@@ -28,4 +28,9 @@ class SeatCoordinateTest {
     assertEquals("A", seat.row());
     assertEquals(12, seat.number());
   }
+
+  @Test
+  void labelJoinsRowAndNumber() {
+    assertEquals("A12", new SeatCoordinate("A", 12).label());
+  }
 }
