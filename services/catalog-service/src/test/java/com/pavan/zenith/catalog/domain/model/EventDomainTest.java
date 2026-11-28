@@ -16,16 +16,19 @@ import com.pavan.zenith.catalog.domain.exception.MissingPriceTierException;
 import com.pavan.zenith.catalog.domain.exception.SalesStartInPastException;
 import com.pavan.zenith.common.values.Money;
 import java.math.BigDecimal;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 // The domain suite for the Event aggregate: plain JUnit, no Spring, no
-// database. Every invariant sentence in docs/architecture/aggregates.md has a
-// failing-case test here. Named *DomainTest so it can be run alone and fast:
+// database - and since Task 1.6 Step 4, no wall clock either. Every moment
+// in this file is a chosen constant, so every run is identical. Named
+// *DomainTest so it can be run alone and fast:
 // mvn -pl services/catalog-service test -Dtest='*DomainTest'
 class EventDomainTest {
 
@@ -35,19 +38,23 @@ class EventDomainTest {
   private static final PriceTier GOLD =
       new PriceTier(new TierCode("GOLD"), new Money(new BigDecimal("2000.00"), "INR"));
 
+  // The one "current moment" of this whole suite - a constant, not a reading.
+  private static final Instant NOW = Instant.parse("2026-11-28T12:00:00Z");
+  private static final Instant SALES_START = NOW.plus(7, ChronoUnit.DAYS);
+  private static final Instant SHOW_START = NOW.plus(30, ChronoUnit.DAYS);
+
   private static Event draftEvent(final UUID id) {
-    Instant showStart = Instant.now().plus(30, ChronoUnit.DAYS);
     return Event.draft(
         id,
         "Jazz Night",
         KOLKATA,
-        new DateRange(showStart, showStart.plus(3, ChronoUnit.HOURS)),
-        Instant.now().plus(7, ChronoUnit.DAYS));
+        new DateRange(SHOW_START, SHOW_START.plus(3, ChronoUnit.HOURS)),
+        SALES_START);
   }
 
   private static Event publishable(final UUID id) {
     Event event = draftEvent(id);
-    event.addPriceTier(GOLD);
+    event.addPriceTier(GOLD, NOW);
     return event;
   }
 
@@ -67,49 +74,65 @@ class EventDomainTest {
 
   @Test
   void draftRefusesNullsAndBlankTitle() {
-    Instant start = Instant.now().plus(1, ChronoUnit.DAYS);
-    DateRange dates = new DateRange(start, start.plus(2, ChronoUnit.HOURS));
-    Instant sales = Instant.now().plus(1, ChronoUnit.HOURS);
+    DateRange dates = new DateRange(SHOW_START, SHOW_START.plus(2, ChronoUnit.HOURS));
     assertThrows(
-        IllegalArgumentException.class, () -> Event.draft(null, "T", KOLKATA, dates, sales));
-    assertThrows(IllegalArgumentException.class, () -> Event.draft(ID, " ", KOLKATA, dates, sales));
-    assertThrows(IllegalArgumentException.class, () -> Event.draft(ID, "T", null, dates, sales));
-    assertThrows(IllegalArgumentException.class, () -> Event.draft(ID, "T", KOLKATA, null, sales));
+        IllegalArgumentException.class, () -> Event.draft(null, "T", KOLKATA, dates, SALES_START));
+    assertThrows(
+        IllegalArgumentException.class, () -> Event.draft(ID, " ", KOLKATA, dates, SALES_START));
+    assertThrows(
+        IllegalArgumentException.class, () -> Event.draft(ID, "T", null, dates, SALES_START));
+    assertThrows(
+        IllegalArgumentException.class, () -> Event.draft(ID, "T", KOLKATA, null, SALES_START));
     assertThrows(IllegalArgumentException.class, () -> Event.draft(ID, "T", KOLKATA, dates, null));
   }
 
   @Test
   void publishRefusesWithoutAnyPriceTier() {
     Event event = draftEvent(ID);
-    assertThrows(MissingPriceTierException.class, event::publish);
+    assertThrows(MissingPriceTierException.class, () -> event.publish(NOW));
   }
 
   @Test
-  void publishRefusesWhenSalesStartIsNotInTheFuture() {
-    Instant showStart = Instant.now().plus(30, ChronoUnit.DAYS);
-    Event event =
-        Event.draft(
-            ID,
-            "Jazz Night",
-            KOLKATA,
-            new DateRange(showStart, showStart.plus(3, ChronoUnit.HOURS)),
-            Instant.now().minus(1, ChronoUnit.HOURS));
-    event.addPriceTier(GOLD);
-    assertThrows(SalesStartInPastException.class, event::publish);
+  void publishRefusesWhenSalesStartIsInThePast() {
+    Event event = publishable(ID);
+    Instant afterSalesStart = SALES_START.plus(1, ChronoUnit.HOURS);
+    assertThrows(SalesStartInPastException.class, () -> event.publish(afterSalesStart));
+  }
+
+  @Test
+  void publishRefusesWhenSalesStartIsExactlyNow() {
+    // The boundary moment: impossible to pin down with a real clock,
+    // trivial with an injected one.
+    Event event = publishable(ID);
+    assertThrows(SalesStartInPastException.class, () -> event.publish(SALES_START));
   }
 
   @Test
   void publishMovesAWellFormedDraftToPublished() {
     Event event = publishable(ID);
-    event.publish();
+    event.publish(NOW);
     assertEquals(Event.Status.PUBLISHED, event.status());
   }
 
   @Test
   void publishRefusesASecondTime() {
     Event event = publishable(ID);
-    event.publish();
-    assertThrows(EventAlreadyPublishedException.class, event::publish);
+    event.publish(NOW);
+    assertThrows(EventAlreadyPublishedException.class, () -> event.publish(NOW));
+  }
+
+  @Test
+  void publishRecordsTheExactMomentTheClockShows() {
+    // THE Step-4 proof: with Clock.fixed, the recorded timestamp can be
+    // asserted exactly. With a real clock this assertion would be flaky.
+    Clock clock = Clock.fixed(Instant.parse("2026-11-28T18:30:00Z"), ZoneOffset.UTC);
+    Event event = publishable(ID);
+    event.pullDomainEvents(); // drain the note recorded while adding the setup tier
+
+    event.publish(Instant.now(clock));
+
+    EventPublished fact = assertInstanceOf(EventPublished.class, event.pullDomainEvents().get(0));
+    assertEquals(Instant.parse("2026-11-28T18:30:00Z"), fact.occurredAt());
   }
 
   @Test
@@ -117,28 +140,28 @@ class EventDomainTest {
     Event event = publishable(ID);
     PriceTier goldAgain =
         new PriceTier(new TierCode("GOLD"), new Money(new BigDecimal("1500.00"), "INR"));
-    assertThrows(DuplicateTierCodeException.class, () -> event.addPriceTier(goldAgain));
+    assertThrows(DuplicateTierCodeException.class, () -> event.addPriceTier(goldAgain, NOW));
   }
 
   @Test
   void rescheduleReplacesTheDates() {
     Event event = draftEvent(ID);
-    Instant newStart = Instant.now().plus(60, ChronoUnit.DAYS);
+    Instant newStart = NOW.plus(60, ChronoUnit.DAYS);
     DateRange newDates = new DateRange(newStart, newStart.plus(3, ChronoUnit.HOURS));
-    event.reschedule(newDates);
+    event.reschedule(newDates, NOW);
     assertEquals(newDates, event.dates());
   }
 
   @Test
   void cancelRecordsTheReasonAndFreezesTheEvent() {
     Event event = publishable(ID);
-    event.publish();
+    event.publish(NOW);
     event.cancel(new Reason("venue flooded"));
     assertEquals(Event.Status.CANCELLED, event.status());
     assertEquals(new Reason("venue flooded"), event.cancellationReason());
-    assertThrows(EventAlreadyCancelledException.class, event::publish);
-    assertThrows(EventAlreadyCancelledException.class, () -> event.addPriceTier(GOLD));
-    assertThrows(EventAlreadyCancelledException.class, () -> event.reschedule(event.dates()));
+    assertThrows(EventAlreadyCancelledException.class, () -> event.publish(NOW));
+    assertThrows(EventAlreadyCancelledException.class, () -> event.addPriceTier(GOLD, NOW));
+    assertThrows(EventAlreadyCancelledException.class, () -> event.reschedule(event.dates(), NOW));
     assertThrows(EventAlreadyCancelledException.class, () -> event.cancel(new Reason("twice")));
     assertThrows(EventAlreadyCancelledException.class, () -> event.rename("New Name"));
   }
@@ -146,10 +169,18 @@ class EventDomainTest {
   @Test
   void intentionMethodsRefuseNullArguments() {
     Event event = draftEvent(ID);
-    assertThrows(IllegalArgumentException.class, () -> event.addPriceTier(null));
-    assertThrows(IllegalArgumentException.class, () -> event.reschedule(null));
+    assertThrows(IllegalArgumentException.class, () -> event.addPriceTier(null, NOW));
+    assertThrows(IllegalArgumentException.class, () -> event.reschedule(null, NOW));
     assertThrows(IllegalArgumentException.class, () -> event.cancel(null));
     assertThrows(IllegalArgumentException.class, () -> event.rename(" "));
+  }
+
+  @Test
+  void timeSensitiveMethodsRefuseANullNow() {
+    Event event = publishable(ID);
+    assertThrows(IllegalArgumentException.class, () -> event.publish(null));
+    assertThrows(IllegalArgumentException.class, () -> event.addPriceTier(GOLD, null));
+    assertThrows(IllegalArgumentException.class, () -> event.reschedule(event.dates(), null));
   }
 
   @Test
@@ -167,14 +198,13 @@ class EventDomainTest {
 
   @Test
   void builderRebuildsAPublishedEventEvenAfterSalesStarted() {
-    Instant pastSalesStart = Instant.now().minus(2, ChronoUnit.DAYS);
-    Instant showStart = Instant.now().plus(10, ChronoUnit.DAYS);
+    Instant pastSalesStart = NOW.minus(2, ChronoUnit.DAYS);
     Event rebuilt =
         Event.builder()
             .id(ID)
             .title("Jazz Night")
             .venueZone(KOLKATA)
-            .dates(new DateRange(showStart, showStart.plus(3, ChronoUnit.HOURS)))
+            .dates(new DateRange(SHOW_START, SHOW_START.plus(3, ChronoUnit.HOURS)))
             .salesStart(pastSalesStart)
             .status(Event.Status.PUBLISHED)
             .addTier(GOLD)
@@ -185,28 +215,26 @@ class EventDomainTest {
 
   @Test
   void builderRefusesAMissingStatus() {
-    Instant showStart = Instant.now().plus(10, ChronoUnit.DAYS);
     Event.Builder builder =
         Event.builder()
             .id(ID)
             .title("Jazz Night")
             .venueZone(KOLKATA)
-            .dates(new DateRange(showStart, showStart.plus(3, ChronoUnit.HOURS)))
-            .salesStart(Instant.now());
+            .dates(new DateRange(SHOW_START, SHOW_START.plus(3, ChronoUnit.HOURS)))
+            .salesStart(SALES_START);
     assertThrows(IllegalArgumentException.class, builder::build);
   }
 
   @Test
   void builderRefusesCancelledWithoutReasonAndReasonWithoutCancelled() {
-    Instant showStart = Instant.now().plus(10, ChronoUnit.DAYS);
-    DateRange dates = new DateRange(showStart, showStart.plus(3, ChronoUnit.HOURS));
+    DateRange dates = new DateRange(SHOW_START, SHOW_START.plus(3, ChronoUnit.HOURS));
     Event.Builder cancelledNoReason =
         Event.builder()
             .id(ID)
             .title("Jazz Night")
             .venueZone(KOLKATA)
             .dates(dates)
-            .salesStart(Instant.now())
+            .salesStart(SALES_START)
             .status(Event.Status.CANCELLED);
     assertThrows(IllegalArgumentException.class, cancelledNoReason::build);
     Event.Builder reasonNotCancelled =
@@ -215,7 +243,7 @@ class EventDomainTest {
             .title("Jazz Night")
             .venueZone(KOLKATA)
             .dates(dates)
-            .salesStart(Instant.now())
+            .salesStart(SALES_START)
             .status(Event.Status.DRAFT)
             .cancellationReason(new Reason("oops"));
     assertThrows(IllegalArgumentException.class, reasonNotCancelled::build);
@@ -225,22 +253,24 @@ class EventDomainTest {
   void publishRecordsExactlyOneEventPublishedAndPullingAgainReturnsEmpty() {
     Event event = publishable(ID);
     event.pullDomainEvents(); // drain the note recorded while adding the setup tier
-    event.publish();
+    event.publish(NOW);
     List<Object> pulled = event.pullDomainEvents();
     assertEquals(1, pulled.size());
     EventPublished published = assertInstanceOf(EventPublished.class, pulled.get(0));
     assertEquals(ID, published.eventId());
+    assertEquals(NOW, published.occurredAt());
     assertEquals(0, event.pullDomainEvents().size());
   }
 
   @Test
   void addPriceTierRecordsAPriceTierChangedCarryingCodeAndPrice() {
     Event event = draftEvent(ID);
-    event.addPriceTier(GOLD);
+    event.addPriceTier(GOLD, NOW);
     List<Object> pulled = event.pullDomainEvents();
     assertEquals(1, pulled.size());
     PriceTierChanged changed = assertInstanceOf(PriceTierChanged.class, pulled.get(0));
     assertEquals(ID, changed.eventId());
+    assertEquals(NOW, changed.occurredAt());
     assertEquals(new TierCode("GOLD"), changed.tier());
     assertEquals(GOLD.price(), changed.newPrice());
   }
@@ -248,8 +278,8 @@ class EventDomainTest {
   @Test
   void rescheduleRecordsAnEventRescheduledCarryingTheNewSchedule() {
     Event event = draftEvent(ID);
-    Instant newStart = Instant.now().plus(90, ChronoUnit.DAYS);
-    event.reschedule(new DateRange(newStart, newStart.plus(3, ChronoUnit.HOURS)));
+    Instant newStart = NOW.plus(90, ChronoUnit.DAYS);
+    event.reschedule(new DateRange(newStart, newStart.plus(3, ChronoUnit.HOURS)), NOW);
     List<Object> pulled = event.pullDomainEvents();
     assertEquals(1, pulled.size());
     EventRescheduled rescheduled = assertInstanceOf(EventRescheduled.class, pulled.get(0));
@@ -261,20 +291,19 @@ class EventDomainTest {
   @Test
   void aRefusedPublishRecordsNothing() {
     Event event = draftEvent(ID);
-    assertThrows(MissingPriceTierException.class, event::publish);
+    assertThrows(MissingPriceTierException.class, () -> event.publish(NOW));
     assertEquals(0, event.pullDomainEvents().size());
   }
 
   @Test
   void rebuildingThroughTheBuilderRecordsNothing() {
-    Instant showStart = Instant.now().plus(10, ChronoUnit.DAYS);
     Event rebuilt =
         Event.builder()
             .id(ID)
             .title("Jazz Night")
             .venueZone(KOLKATA)
-            .dates(new DateRange(showStart, showStart.plus(3, ChronoUnit.HOURS)))
-            .salesStart(Instant.now().minus(2, ChronoUnit.DAYS))
+            .dates(new DateRange(SHOW_START, SHOW_START.plus(3, ChronoUnit.HOURS)))
+            .salesStart(NOW.minus(2, ChronoUnit.DAYS))
             .status(Event.Status.PUBLISHED)
             .addTier(GOLD)
             .build();
@@ -283,14 +312,13 @@ class EventDomainTest {
 
   @Test
   void builderRefusesDuplicateTierCodes() {
-    Instant showStart = Instant.now().plus(10, ChronoUnit.DAYS);
     Event.Builder builder =
         Event.builder()
             .id(ID)
             .title("Jazz Night")
             .venueZone(KOLKATA)
-            .dates(new DateRange(showStart, showStart.plus(3, ChronoUnit.HOURS)))
-            .salesStart(Instant.now())
+            .dates(new DateRange(SHOW_START, SHOW_START.plus(3, ChronoUnit.HOURS)))
+            .salesStart(SALES_START)
             .status(Event.Status.DRAFT)
             .addTier(GOLD)
             .addTier(new PriceTier(new TierCode("GOLD"), new Money(new BigDecimal("1.00"), "INR")));
@@ -300,10 +328,10 @@ class EventDomainTest {
   @Test
   void everyBusinessRuleRefusalCanBeCaughtAsADomainException() {
     Event draft = draftEvent(ID);
-    assertThrows(DomainException.class, draft::publish); // missing price tier
+    assertThrows(DomainException.class, () -> draft.publish(NOW)); // missing price tier
     Event published = publishable(OTHER_ID);
-    published.publish();
-    assertThrows(DomainException.class, published::publish); // already published
+    published.publish(NOW);
+    assertThrows(DomainException.class, () -> published.publish(NOW)); // already published
     published.cancel(new Reason("venue flooded"));
     assertThrows(
         DomainException.class, () -> published.rename("New Name")); // cancelled stays cancelled

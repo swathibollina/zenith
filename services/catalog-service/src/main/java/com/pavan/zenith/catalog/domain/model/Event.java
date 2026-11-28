@@ -16,7 +16,8 @@ import java.util.UUID;
 
 // The Event aggregate root. All changes go through intention methods that
 // enforce the invariants from docs/architecture/aggregates.md before touching
-// any state. No setters, no framework imports.
+// any state. No setters, no framework imports. Time-sensitive methods take
+// "now" as an argument: the aggregate judges time, it never reads the clock.
 public class Event {
 
   public enum Status {
@@ -95,12 +96,12 @@ public class Event {
           "a cancelled event has a reason, and only a cancelled event may have one");
     }
     for (PriceTier tier : builder.tiers) {
-      addPriceTier(tier);
+      storeTier(tier);
     }
     this.status = builder.status;
     this.cancellationReason = builder.cancellationReason;
-    // Rebuilding is not a change. Any notes recorded while copying the saved
-    // tiers back in are wiped: those facts were announced when they happened.
+    // Rebuilding is not a change: tiers are stored without recording notes,
+    // and this wipe guards that promise if a future builder step ever records.
     this.domainEvents.clear();
   }
 
@@ -161,8 +162,10 @@ public class Event {
   }
 
   // Invariants: only a draft can be published; needs at least one price tier
-  // and a sales start still in the future.
-  public void publish() {
+  // and a sales start still in the future - judged against the "now" the
+  // caller supplies, so the rule is testable at any chosen moment.
+  public void publish(final Instant now) {
+    requireNow(now);
     refuseIfCancelled();
     if (status == Status.PUBLISHED) {
       throw new EventAlreadyPublishedException(id);
@@ -170,35 +173,29 @@ public class Event {
     if (tiers.isEmpty()) {
       throw new MissingPriceTierException(id);
     }
-    if (!salesStart.isAfter(Instant.now())) {
+    if (!salesStart.isAfter(now)) {
       throw new SalesStartInPastException(id, salesStart);
     }
     this.status = Status.PUBLISHED;
-    domainEvents.add(new EventPublished(id, Instant.now()));
+    domainEvents.add(new EventPublished(id, now));
   }
 
   // Invariant: no two tiers of the same event share a tier code.
-  public void addPriceTier(final PriceTier tier) {
-    if (tier == null) {
-      throw new IllegalArgumentException("tier must not be null");
-    }
+  public void addPriceTier(final PriceTier tier, final Instant now) {
+    requireNow(now);
     refuseIfCancelled();
-    boolean codeTaken = tiers.stream().anyMatch(existing -> existing.code().equals(tier.code()));
-    if (codeTaken) {
-      throw new DuplicateTierCodeException(id, tier.code());
-    }
-    tiers.add(tier);
-    domainEvents.add(new PriceTierChanged(id, Instant.now(), tier.code(), tier.price()));
+    storeTier(tier);
+    domainEvents.add(new PriceTierChanged(id, now, tier.code(), tier.price()));
   }
 
-  public void reschedule(final DateRange newDates) {
+  public void reschedule(final DateRange newDates, final Instant now) {
     if (newDates == null) {
       throw new IllegalArgumentException("newDates must not be null");
     }
+    requireNow(now);
     refuseIfCancelled();
     this.dates = newDates;
-    domainEvents.add(
-        new EventRescheduled(id, Instant.now(), new EventSchedule(newDates.start(), venueZone)));
+    domainEvents.add(new EventRescheduled(id, now, new EventSchedule(newDates.start(), venueZone)));
   }
 
   // Invariant: an event that has been cancelled stays cancelled.
@@ -232,6 +229,25 @@ public class Event {
     if (status == Status.CANCELLED) {
       throw new EventAlreadyCancelledException(id);
     }
+  }
+
+  private static void requireNow(final Instant now) {
+    if (now == null) {
+      throw new IllegalArgumentException("now must not be null");
+    }
+  }
+
+  // Validation and storage shared by addPriceTier and the Builder: enforces
+  // the duplicate-code invariant and stores the tier, recording nothing.
+  private void storeTier(final PriceTier tier) {
+    if (tier == null) {
+      throw new IllegalArgumentException("tier must not be null");
+    }
+    boolean codeTaken = tiers.stream().anyMatch(existing -> existing.code().equals(tier.code()));
+    if (codeTaken) {
+      throw new DuplicateTierCodeException(id, tier.code());
+    }
+    tiers.add(tier);
   }
 
   public UUID id() {
