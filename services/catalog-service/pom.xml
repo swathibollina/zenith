@@ -37,6 +37,13 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- @Transactional lives here. The transaction manager itself arrives
+     with the JPA starter in Task 1.10; until then the annotation
+     declares each use case's boundary and is inert at runtime. -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-tx</artifactId>
+        </dependency>
     </dependencies>
 
     <build>
