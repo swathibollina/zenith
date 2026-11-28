@@ -3,7 +3,10 @@
 One row per pattern, filled in only when a real class starts using it. No row
 is written from theory alone.
 
-| Pattern | Where used | What problem it solved |
-| --- | --- | --- |
-| Static Factory | `Event.draft(...)` in catalog-service | A named, validating front door for new drafts; unlike `new`, it can refuse to return an object and its name says what it creates. |
-| Builder | `Event.Builder` in catalog-service | Reconstruction from storage needs eight fields; eight positional constructor arguments invite silent swaps, named builder steps do not. |
+| Pattern | Where used | What problem it solved | What I would do differently |
+| --- | --- | --- | --- |
+| Static Factory | `Event.draft(...)` in catalog-service | A named, validating front door for new drafts; unlike `new`, it can refuse to return an object and its name says what it creates. | Nothing yet. |
+| Builder | `Event.Builder` in catalog-service | Reconstruction from storage needs eight fields; eight positional constructor arguments invite silent swaps, named builder steps do not. | Nothing yet; revisit when JPA reconstruction arrives in Task 1.10. |
+| Strategy | `PricingRule` interface with `FlatPricing`, `TieredPricing`, `DynamicDemandPricing` in catalog-service | Deleted the `if/else` chain on pricing type that would grow a branch every quarter. Each algorithm is its own class behind one interface, so a fourth rule is a new class instead of an edit to three working ones, and tests grow one class per rule instead of every branch multiplying against the old ones. | If the rules were stateless one-liners with no shared steps, a map of lambdas would be simpler; watch for that if the hierarchy ever feels heavy. |
+| Template Method | `AbstractPricingRule` in catalog-service | The chores every rule shares (currency check, rounding, minimum-price floor) were about to be copy-pasted into three classes and drift apart. The base runs them in a locked order and leaves only the calculation abstract; deleting the currency check broke all three rules' tests at once, proof it lives exactly once. | Keep the base this small. If it ever needs a second abstract hook, question the hierarchy before adding it; deep inheritance is where this pattern goes bad. |
+| Factory Method | `PricingRuleFactory.ruleFor(...)` in catalog-service | The persisted rule type has to become an object somewhere; this is the single place in the codebase allowed to branch on `PricingRuleType`. The switch is exhaustive, so a fourth type refuses to compile until the factory handles it. | If building a rule ever needs config or repository lookups, make the factory an injected instance instead of a static method so tests can swap it. |
